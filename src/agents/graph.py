@@ -15,8 +15,9 @@ warnings.filterwarnings(
 from langgraph.graph import END, StateGraph
 
 from src.agents.prompts import (
+    FLAG_TOOL_PROMPT_TEMPLATE,
+    RETRIEVAL_TOOL_PROMPT_TEMPLATE,
     SYSTEM_PROMPT,
-    TOOL_CALLING_PROMPT_TEMPLATE,
     USER_PROMPT_TEMPLATE,
 )
 from src.ingestion.extractor import extract_measurements
@@ -88,63 +89,46 @@ def build_analysis_graph(llm, vector_store: LocalVectorStore):
                 }
             )
 
-        tools = [flag_abnormal_results, retrieve_medical_context]
-        tool_map = {tool_item.name: tool_item for tool_item in tools}
         compact_measurements = json.dumps(
             [m.model_dump() for m in measurements], indent=2
         )
-        tool_prompt = TOOL_CALLING_PROMPT_TEMPLATE.format(
+
+        flag_prompt = FLAG_TOOL_PROMPT_TEMPLATE.format(
             lab_measurements=compact_measurements
         )
-
-        response = llm.bind_tools(tools).invoke(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": tool_prompt},
-            ]
+        flag_calls = _invoke_required_tool_call(
+            llm=llm,
+            tools=[flag_abnormal_results],
+            prompt=flag_prompt,
+            required_tool_name="flag_abnormal_results",
         )
 
         updates: WorkflowState = {"tool_trace": []}
-        tool_calls = getattr(response, "tool_calls", None) or []
-        if not tool_calls:
-            raise RuntimeError(
-                "Gemma did not return tool calls. This project requires Gemma "
-                "function calling; no deterministic fallback was used."
-            )
+        flag_result = _execute_required_tool_call(
+            call=flag_calls[0],
+            tool_item=flag_abnormal_results,
+            required_tool_name="flag_abnormal_results",
+            default_args={"measurements_json": compact_measurements},
+            updates=updates,
+        )
 
-        executed_tools: set[str] = set()
-
-        for call in tool_calls:
-            name = call.get("name", "")
-            args = _tool_call_args(call)
-            if name not in tool_map:
-                continue
-
-            if name == "flag_abnormal_results" and not args.get("measurements_json"):
-                args["measurements_json"] = compact_measurements
-            if name == "retrieve_medical_context" and not args.get("query"):
-                args["query"] = _default_retrieval_query(measurements)
-
-            result = tool_map[name].invoke(args)
-            executed_tools.add(name)
-            _apply_tool_result(updates, name, result)
-            updates["tool_trace"].append(
-                {
-                    "name": name,
-                    "status": "executed",
-                    "args": args,
-                    "result_preview": result[:500],
-                }
-            )
-
-        required_tools = {"flag_abnormal_results", "retrieve_medical_context"}
-        missing_tools = required_tools - executed_tools
-        if missing_tools:
-            missing = ", ".join(sorted(missing_tools))
-            raise RuntimeError(
-                f"Gemma did not call required tool(s): {missing}. This project "
-                "requires Gemma function calling for analysis."
-            )
+        retrieval_prompt = RETRIEVAL_TOOL_PROMPT_TEMPLATE.format(
+            lab_measurements=compact_measurements,
+            flag_output=flag_result,
+        )
+        retrieval_calls = _invoke_required_tool_call(
+            llm=llm,
+            tools=[retrieve_medical_context],
+            prompt=retrieval_prompt,
+            required_tool_name="retrieve_medical_context",
+        )
+        _execute_required_tool_call(
+            call=retrieval_calls[0],
+            tool_item=retrieve_medical_context,
+            required_tool_name="retrieve_medical_context",
+            default_args={"query": _default_retrieval_query(measurements)},
+            updates=updates,
+        )
 
         return updates
 
@@ -224,6 +208,54 @@ def _merge_lists(first: list[str], second: list[str]) -> list[str]:
             continue
         seen.add(value)
         result.append(value)
+    return result
+
+
+def _invoke_required_tool_call(
+    llm: Any, tools: list[Any], prompt: str, required_tool_name: str
+) -> list[dict[str, Any]]:
+    response = llm.bind_tools(tools).invoke(
+        [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+    )
+    tool_calls = getattr(response, "tool_calls", None) or []
+    matching_calls = [
+        call for call in tool_calls if call.get("name") == required_tool_name
+    ]
+    if not matching_calls:
+        returned = [call.get("name", "<unnamed>") for call in tool_calls]
+        raise RuntimeError(
+            f"Gemma did not call required tool: {required_tool_name}. "
+            f"Returned tool calls: {returned or 'none'}. This project requires "
+            "Gemma function calling for analysis."
+        )
+    return matching_calls
+
+
+def _execute_required_tool_call(
+    call: dict[str, Any],
+    tool_item: Any,
+    required_tool_name: str,
+    default_args: dict[str, Any],
+    updates: WorkflowState,
+) -> str:
+    args = _tool_call_args(call)
+    for key, value in default_args.items():
+        if not args.get(key):
+            args[key] = value
+
+    result = tool_item.invoke(args)
+    _apply_tool_result(updates, required_tool_name, result)
+    updates["tool_trace"].append(
+        {
+            "name": required_tool_name,
+            "status": "executed",
+            "args": args,
+            "result_preview": result[:500],
+        }
+    )
     return result
 
 

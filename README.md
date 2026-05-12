@@ -109,12 +109,14 @@ Open the URL shown by Streamlit (typically `http://localhost:8501`).
    - `parse_labs`
    - `gemma_tool_call_node`
    - `llm_node`
-6. Gemma must call local tools for abnormal-result flagging and Chroma retrieval.
+6. Gemma must call local tools in two sequential steps:
+   - `flag_abnormal_results`
+   - `retrieve_medical_context`
 7. Gemma returns structured JSON, rendered in Streamlit sections.
 
-If Gemma does not return the required tool calls, the graph raises an error. This
-is intentional because the project is designed to showcase Gemma function calling,
-not a deterministic fallback.
+If Gemma does not return either required tool call, the graph raises an error.
+This is intentional because the project is designed to showcase Gemma function
+calling, not a deterministic fallback.
 
 ## Safety Notes
 
