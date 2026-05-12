@@ -1,0 +1,29 @@
+[project]
+name = "local-medical-report-assistant"
+version = "0.1.0"
+description = "Local-first medical report assistant using Streamlit, Ollama, Chroma, LangChain, and LangGraph."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "streamlit==1.45.1",
+  "langchain==0.3.25",
+  "langchain-community==0.3.24",
+  "langchain-ollama==0.2.2",
+  "langgraph==0.4.7",
+  "chromadb==0.4.24",
+  "pydantic==2.11.4",
+  "pypdf==5.5.0",
+  "pandas==2.2.3",
+  "numpy==1.26.4",
+  "python-dotenv==1.1.0",
+  "pillow==11.2.1",
+  "pytesseract==0.3.13",
+  "onnxruntime==1.16.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false
