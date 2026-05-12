@@ -4,9 +4,14 @@ import json
 import re
 from typing import Any, TypedDict
 
+from langchain_core.tools import tool
 from langgraph.graph import END, StateGraph
 
-from src.agents.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+from src.agents.prompts import (
+    SYSTEM_PROMPT,
+    TOOL_CALLING_PROMPT_TEMPLATE,
+    USER_PROMPT_TEMPLATE,
+)
 from src.ingestion.extractor import extract_measurements
 from src.models import AnalysisOutput, LabMeasurement
 from src.retrieval.vector_store import LocalVectorStore
@@ -22,6 +27,7 @@ class WorkflowState(TypedDict, total=False):
     nutrition_signals: list[str]
     retrieved_context: str
     citations: list[str]
+    tool_trace: list[dict[str, Any]]
     output: AnalysisOutput
     error: str
 
@@ -34,7 +40,107 @@ def build_analysis_graph(llm, vector_store: LocalVectorStore):
         measurements = extract_measurements(text)
         return {"measurements": measurements}
 
+    def gemma_tool_call_node(state: WorkflowState) -> WorkflowState:
+        measurements = state.get("measurements", [])
+        if not measurements or not hasattr(llm, "bind_tools"):
+            return {"tool_trace": []}
+
+        @tool
+        def flag_abnormal_results(measurements_json: str) -> str:
+            """Flag out-of-range lab measurements and nutrition-related signals."""
+            parsed_measurements = _measurements_from_json(measurements_json)
+            concerns, doctor_signals, nutrition_signals = build_rule_flags(
+                parsed_measurements
+            )
+            return json.dumps(
+                {
+                    "concerns": concerns,
+                    "doctor_signals": doctor_signals,
+                    "nutrition_signals": nutrition_signals,
+                }
+            )
+
+        @tool
+        def retrieve_medical_context(query: str) -> str:
+            """Retrieve local report and medical knowledge context from ChromaDB."""
+            docs = vector_store.retrieve_context(
+                query=query, report_id=state["report_id"], k=4
+            )
+            return json.dumps(
+                {
+                    "context": "\n\n".join(doc.page_content for doc in docs),
+                    "citations": [doc.metadata.get("source", "knowledge") for doc in docs],
+                }
+            )
+
+        tools = [flag_abnormal_results, retrieve_medical_context]
+        tool_map = {tool_item.name: tool_item for tool_item in tools}
+        compact_measurements = json.dumps(
+            [m.model_dump() for m in measurements], indent=2
+        )
+        tool_prompt = TOOL_CALLING_PROMPT_TEMPLATE.format(
+            lab_measurements=compact_measurements
+        )
+
+        try:
+            response = llm.bind_tools(tools).invoke(
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": tool_prompt},
+                ]
+            )
+        except Exception as exc:
+            return {
+                "tool_trace": [
+                    {
+                        "name": "gemma_tool_calling",
+                        "status": "fallback",
+                        "detail": f"Tool calling unavailable: {exc}",
+                    }
+                ]
+            }
+
+        updates: WorkflowState = {"tool_trace": []}
+        tool_calls = getattr(response, "tool_calls", None) or []
+        if not tool_calls:
+            updates["tool_trace"] = [
+                {
+                    "name": "gemma_tool_calling",
+                    "status": "fallback",
+                    "detail": "Model returned no tool calls; deterministic graph nodes were used.",
+                }
+            ]
+            return updates
+
+        for call in tool_calls:
+            name = call.get("name", "")
+            args = _tool_call_args(call)
+            if name not in tool_map:
+                continue
+
+            if name == "flag_abnormal_results" and not args.get("measurements_json"):
+                args["measurements_json"] = compact_measurements
+            if name == "retrieve_medical_context" and not args.get("query"):
+                args["query"] = _default_retrieval_query(measurements)
+
+            result = tool_map[name].invoke(args)
+            _apply_tool_result(updates, name, result)
+            updates["tool_trace"].append(
+                {
+                    "name": name,
+                    "status": "executed",
+                    "args": args,
+                    "result_preview": result[:500],
+                }
+            )
+
+        return updates
+
     def rules_node(state: WorkflowState) -> WorkflowState:
+        if state.get("concerns") or state.get("doctor_signals") or state.get(
+            "nutrition_signals"
+        ):
+            return {}
         measurements = state.get("measurements", [])
         concerns, doctor_signals, nutrition_signals = build_rule_flags(measurements)
         return {
@@ -44,6 +150,8 @@ def build_analysis_graph(llm, vector_store: LocalVectorStore):
         }
 
     def retrieval_node(state: WorkflowState) -> WorkflowState:
+        if state.get("retrieved_context"):
+            return {}
         measurements = state.get("measurements", [])
         abnormal_tests = [m.test_name for m in measurements if m.status in {"low", "high"}]
         if abnormal_tests:
@@ -96,11 +204,13 @@ def build_analysis_graph(llm, vector_store: LocalVectorStore):
         return {"output": merged}
 
     graph.add_node("parse_labs", parse_labs)
+    graph.add_node("gemma_tool_call_node", gemma_tool_call_node)
     graph.add_node("rules_node", rules_node)
     graph.add_node("retrieval_node", retrieval_node)
     graph.add_node("llm_node", llm_node)
     graph.set_entry_point("parse_labs")
-    graph.add_edge("parse_labs", "rules_node")
+    graph.add_edge("parse_labs", "gemma_tool_call_node")
+    graph.add_edge("gemma_tool_call_node", "rules_node")
     graph.add_edge("rules_node", "retrieval_node")
     graph.add_edge("retrieval_node", "llm_node")
     graph.add_edge("llm_node", END)
@@ -135,6 +245,58 @@ def _merge_lists(first: list[str], second: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _measurements_from_json(measurements_json: str) -> list[LabMeasurement]:
+    try:
+        raw_measurements = json.loads(measurements_json)
+    except json.JSONDecodeError:
+        return []
+
+    measurements: list[LabMeasurement] = []
+    for raw in raw_measurements:
+        try:
+            measurements.append(LabMeasurement.model_validate(raw))
+        except Exception:
+            continue
+    return measurements
+
+
+def _tool_call_args(call: dict[str, Any]) -> dict[str, Any]:
+    args = call.get("args", {})
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _apply_tool_result(
+    updates: WorkflowState, tool_name: str, result: str
+) -> None:
+    try:
+        parsed = json.loads(result)
+    except json.JSONDecodeError:
+        return
+
+    if tool_name == "flag_abnormal_results":
+        updates["concerns"] = parsed.get("concerns", [])
+        updates["doctor_signals"] = parsed.get("doctor_signals", [])
+        updates["nutrition_signals"] = parsed.get("nutrition_signals", [])
+    elif tool_name == "retrieve_medical_context":
+        updates["retrieved_context"] = parsed.get("context", "")
+        updates["citations"] = parsed.get("citations", [])
+
+
+def _default_retrieval_query(measurements: list[LabMeasurement]) -> str:
+    abnormal_tests = [m.test_name for m in measurements if m.status in {"low", "high"}]
+    if abnormal_tests:
+        return " ".join(abnormal_tests)
+    return "medical report interpretation and lifestyle guidance"
 
 
 def _merge_concern_lists(

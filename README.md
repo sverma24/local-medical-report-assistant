@@ -4,7 +4,7 @@ Streamlit app for private, local-first medical report understanding using:
 
 - `Ollama` + `gemma4:26b` for reasoning
 - `ChromaDB` for local vector retrieval
-- `LangChain` + `LangGraph` for orchestration
+- `LangChain` + `LangGraph` for orchestration and local function calling
 - Rule-based checks for abnormalities and nutritional signals
 
 The app is educational and does not provide diagnosis.
@@ -15,6 +15,7 @@ The app is educational and does not provide diagnosis.
 - Extract lab values (test name, value, reference range, status).
 - Detect potential concerns using a local rules engine.
 - Retrieve relevant context from local Chroma knowledge base.
+- Expose local tools to Gemma for abnormal-result checks and Chroma retrieval.
 - Generate plain-language summary and doctor discussion prompts.
 - Keep processing fully local on your machine.
 
@@ -106,10 +107,15 @@ Open the URL shown by Streamlit (typically `http://localhost:8501`).
 4. App retrieves relevant report + medical knowledge chunks.
 5. LangGraph pipeline runs:
    - `parse_labs`
+   - `gemma_tool_call_node`
    - `rules_node`
    - `retrieval_node`
    - `llm_node`
-6. Gemma returns structured JSON, rendered in Streamlit sections.
+6. Gemma can call local tools for abnormal-result flagging and Chroma retrieval.
+7. Gemma returns structured JSON, rendered in Streamlit sections.
+
+If Ollama or the selected model does not return tool calls, the graph falls back to
+the deterministic rule and retrieval nodes so the app remains usable.
 
 ## Safety Notes
 

@@ -102,6 +102,12 @@ with st.spinner("Running LangGraph workflow with local Gemma model..."):
 
 measurements = result.get("measurements", [])
 output = result.get("output")
+tool_trace = result.get("tool_trace", [])
+
+if tool_trace:
+    with st.expander("Gemma local function calls", expanded=False):
+        for item in tool_trace:
+            st.json(item)
 
 st.subheader("Extracted Lab Values")
 if measurements:
@@ -132,4 +138,3 @@ if citations:
     st.caption("Retrieved context sources")
     for source in sorted(set(citations)):
         st.write(f"- {source}")
-
