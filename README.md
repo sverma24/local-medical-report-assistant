@@ -15,7 +15,7 @@ The app is educational and does not provide diagnosis.
 - Extract lab values (test name, value, reference range, status).
 - Detect potential concerns using a local rules engine.
 - Retrieve relevant context from local Chroma knowledge base.
-- Expose local tools to Gemma for abnormal-result checks and Chroma retrieval.
+- Require Gemma to call local tools for abnormal-result checks and Chroma retrieval.
 - Generate plain-language summary and doctor discussion prompts.
 - Keep processing fully local on your machine.
 
@@ -108,14 +108,13 @@ Open the URL shown by Streamlit (typically `http://localhost:8501`).
 5. LangGraph pipeline runs:
    - `parse_labs`
    - `gemma_tool_call_node`
-   - `rules_node`
-   - `retrieval_node`
    - `llm_node`
-6. Gemma can call local tools for abnormal-result flagging and Chroma retrieval.
+6. Gemma must call local tools for abnormal-result flagging and Chroma retrieval.
 7. Gemma returns structured JSON, rendered in Streamlit sections.
 
-If Ollama or the selected model does not return tool calls, the graph falls back to
-the deterministic rule and retrieval nodes so the app remains usable.
+If Gemma does not return the required tool calls, the graph raises an error. This
+is intentional because the project is designed to showcase Gemma function calling,
+not a deterministic fallback.
 
 ## Safety Notes
 
@@ -129,6 +128,9 @@ the deterministic rule and retrieval nodes so the app remains usable.
   - Start Ollama with `ollama serve`.
 - Missing model:
   - Run `ollama pull gemma4:26b` and `ollama pull nomic-embed-text`.
+- Gemma tool-calling error:
+  - Confirm that your Ollama Gemma model supports tool/function calls.
+  - Increase `OLLAMA_TIMEOUT_SECONDS` in `.env` if your Mac needs more time.
 - No labs extracted:
   - Some report formats are hard to parse; test with clearer PDF/text exports.
 - OCR not working:

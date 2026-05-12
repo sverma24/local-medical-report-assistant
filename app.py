@@ -44,6 +44,7 @@ def _build_llm(config: AppConfig) -> ChatOllama:
         model=config.llm_model,
         base_url=config.ollama_base_url,
         temperature=0.2,
+        client_kwargs={"timeout": config.ollama_timeout_seconds},
     )
 
 
@@ -66,6 +67,7 @@ with st.sidebar:
     st.write(f"LLM: `{config.llm_model}`")
     st.write(f"Embeddings: `{config.embedding_model}`")
     st.write(f"Ollama endpoint: `{config.ollama_base_url}`")
+    st.write(f"Ollama timeout: `{config.ollama_timeout_seconds:.0f}s`")
     st.write(f"Chroma dir: `{config.chroma_dir}`")
 
 uploaded_file = st.file_uploader(
@@ -97,8 +99,12 @@ report_id = str(uuid.uuid4())
 with st.spinner("Indexing report in local ChromaDB..."):
     vector_store.index_report(report_id=report_id, report_text=report_text)
 
-with st.spinner("Running LangGraph workflow with local Gemma model..."):
-    result = graph.invoke({"report_id": report_id, "report_text": report_text})
+try:
+    with st.spinner("Running LangGraph workflow with mandatory Gemma tool calls..."):
+        result = graph.invoke({"report_id": report_id, "report_text": report_text})
+except Exception as exc:
+    st.error(f"Analysis stopped: {exc}")
+    st.stop()
 
 measurements = result.get("measurements", [])
 output = result.get("output")

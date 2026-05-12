@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from typing import Any, TypedDict
 
 from langchain_core.tools import tool
+
+warnings.filterwarnings(
+    "ignore",
+    message="The default value of `allowed_objects` will change.*",
+)
+
 from langgraph.graph import END, StateGraph
 
 from src.agents.prompts import (
@@ -42,8 +49,16 @@ def build_analysis_graph(llm, vector_store: LocalVectorStore):
 
     def gemma_tool_call_node(state: WorkflowState) -> WorkflowState:
         measurements = state.get("measurements", [])
-        if not measurements or not hasattr(llm, "bind_tools"):
-            return {"tool_trace": []}
+        if not measurements:
+            raise RuntimeError(
+                "No structured lab measurements were extracted. Mandatory Gemma "
+                "tool calling cannot continue without measurements."
+            )
+        if not hasattr(llm, "bind_tools"):
+            raise RuntimeError(
+                "The configured LLM client does not expose bind_tools(). Gemma "
+                "tool calling is required for this project."
+            )
 
         @tool
         def flag_abnormal_results(measurements_json: str) -> str:
@@ -82,35 +97,22 @@ def build_analysis_graph(llm, vector_store: LocalVectorStore):
             lab_measurements=compact_measurements
         )
 
-        try:
-            response = llm.bind_tools(tools).invoke(
-                [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": tool_prompt},
-                ]
-            )
-        except Exception as exc:
-            return {
-                "tool_trace": [
-                    {
-                        "name": "gemma_tool_calling",
-                        "status": "fallback",
-                        "detail": f"Tool calling unavailable: {exc}",
-                    }
-                ]
-            }
+        response = llm.bind_tools(tools).invoke(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": tool_prompt},
+            ]
+        )
 
         updates: WorkflowState = {"tool_trace": []}
         tool_calls = getattr(response, "tool_calls", None) or []
         if not tool_calls:
-            updates["tool_trace"] = [
-                {
-                    "name": "gemma_tool_calling",
-                    "status": "fallback",
-                    "detail": "Model returned no tool calls; deterministic graph nodes were used.",
-                }
-            ]
-            return updates
+            raise RuntimeError(
+                "Gemma did not return tool calls. This project requires Gemma "
+                "function calling; no deterministic fallback was used."
+            )
+
+        executed_tools: set[str] = set()
 
         for call in tool_calls:
             name = call.get("name", "")
@@ -124,6 +126,7 @@ def build_analysis_graph(llm, vector_store: LocalVectorStore):
                 args["query"] = _default_retrieval_query(measurements)
 
             result = tool_map[name].invoke(args)
+            executed_tools.add(name)
             _apply_tool_result(updates, name, result)
             updates["tool_trace"].append(
                 {
@@ -134,35 +137,16 @@ def build_analysis_graph(llm, vector_store: LocalVectorStore):
                 }
             )
 
+        required_tools = {"flag_abnormal_results", "retrieve_medical_context"}
+        missing_tools = required_tools - executed_tools
+        if missing_tools:
+            missing = ", ".join(sorted(missing_tools))
+            raise RuntimeError(
+                f"Gemma did not call required tool(s): {missing}. This project "
+                "requires Gemma function calling for analysis."
+            )
+
         return updates
-
-    def rules_node(state: WorkflowState) -> WorkflowState:
-        if state.get("concerns") or state.get("doctor_signals") or state.get(
-            "nutrition_signals"
-        ):
-            return {}
-        measurements = state.get("measurements", [])
-        concerns, doctor_signals, nutrition_signals = build_rule_flags(measurements)
-        return {
-            "concerns": concerns,
-            "doctor_signals": doctor_signals,
-            "nutrition_signals": nutrition_signals,
-        }
-
-    def retrieval_node(state: WorkflowState) -> WorkflowState:
-        if state.get("retrieved_context"):
-            return {}
-        measurements = state.get("measurements", [])
-        abnormal_tests = [m.test_name for m in measurements if m.status in {"low", "high"}]
-        if abnormal_tests:
-            query = " ".join(abnormal_tests)
-        else:
-            query = "medical report interpretation and lifestyle guidance"
-
-        docs = vector_store.retrieve_context(query=query, report_id=state["report_id"], k=4)
-        context = "\n\n".join(doc.page_content for doc in docs)
-        citations = [doc.metadata.get("source", "knowledge") for doc in docs]
-        return {"retrieved_context": context, "citations": citations}
 
     def llm_node(state: WorkflowState) -> WorkflowState:
         measurements = state.get("measurements", [])
@@ -205,14 +189,10 @@ def build_analysis_graph(llm, vector_store: LocalVectorStore):
 
     graph.add_node("parse_labs", parse_labs)
     graph.add_node("gemma_tool_call_node", gemma_tool_call_node)
-    graph.add_node("rules_node", rules_node)
-    graph.add_node("retrieval_node", retrieval_node)
     graph.add_node("llm_node", llm_node)
     graph.set_entry_point("parse_labs")
     graph.add_edge("parse_labs", "gemma_tool_call_node")
-    graph.add_edge("gemma_tool_call_node", "rules_node")
-    graph.add_edge("rules_node", "retrieval_node")
-    graph.add_edge("retrieval_node", "llm_node")
+    graph.add_edge("gemma_tool_call_node", "llm_node")
     graph.add_edge("llm_node", END)
     return graph.compile()
 

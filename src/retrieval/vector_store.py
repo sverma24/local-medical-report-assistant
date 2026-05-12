@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
+from chromadb.config import Settings
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
+
+warnings.filterwarnings(
+    "ignore",
+    message="The class `Chroma` was deprecated.*",
+)
+
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 from langchain_ollama import OllamaEmbeddings
@@ -18,15 +26,18 @@ class LocalVectorStore:
         self.embeddings = OllamaEmbeddings(
             model=config.embedding_model, base_url=config.ollama_base_url
         )
+        chroma_settings = Settings(anonymized_telemetry=False)
         self.knowledge_store = Chroma(
             collection_name=config.knowledge_collection,
             embedding_function=self.embeddings,
             persist_directory=str(config.chroma_dir),
+            client_settings=chroma_settings,
         )
         self.report_store = Chroma(
             collection_name=config.report_collection,
             embedding_function=self.embeddings,
             persist_directory=str(config.chroma_dir),
+            client_settings=chroma_settings,
         )
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=900, chunk_overlap=120, separators=["\n\n", "\n", ". "]

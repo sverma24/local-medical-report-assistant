@@ -13,6 +13,6 @@ class AppConfig:
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     llm_model: str = os.getenv("LLM_MODEL", "gemma4:26b")
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+    ollama_timeout_seconds: float = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180"))
     report_collection: str = "medical_reports"
     knowledge_collection: str = "medical_knowledge"
-
