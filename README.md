@@ -2,9 +2,9 @@
 
 Streamlit app for private, local-first medical report understanding using:
 
-- `Ollama` + `gemma4:26b` for reasoning
+- `Ollama` + `gemma4:e4b` for reasoning
 - `ChromaDB` for local vector retrieval
-- `LangChain` + `LangGraph` for orchestration and local function calling
+- `LangChain` + `LangGraph` for deterministic orchestration
 - Rule-based checks for abnormalities and nutritional signals
 
 The app is educational and does not provide diagnosis.
@@ -25,15 +25,20 @@ The app is educational and does not provide diagnosis.
 vaultmd/
 ├── app.py
 ├── pyproject.toml
+├── uv.lock
 ├── .env.example
 ├── .gitignore
 ├── README.md
 ├── data/
-│   ├── chroma/                  # auto-created local vector DB
+│   ├── chroma/                  # auto-created local vector DB (runtime)
 │   └── knowledge/
 │       ├── common_labs.md
 │       ├── nutrition_guidance.md
-│       └── safety_red_flags.md
+│       ├── safety_red_flags.md
+│       └── medlineplus/         # downloaded lab-test corpus
+├── scripts/
+│   ├── prepare_medlineplus_knowledge.py
+│   └── prepare_vector_db.py
 └── src/
     ├── __init__.py
     ├── config.py
@@ -62,7 +67,7 @@ vaultmd/
 4. Pulled local models:
 
 ```bash
-ollama pull gemma4:26b
+ollama pull gemma4:e4b
 ollama pull nomic-embed-text
 ```
 
@@ -81,6 +86,31 @@ uv venv --python 3.11
 source .venv/bin/activate
 uv sync --python 3.11
 cp .env.example .env
+```
+
+Latency tuning defaults are in `.env`:
+- `MAX_MEASUREMENTS_FOR_LLM=40`
+- `REPORT_RETRIEVAL_K=2`
+- `KNOWLEDGE_RETRIEVAL_K=2`
+- `RETRIEVED_CONTEXT_CHAR_LIMIT=2800`
+
+## Prepare MedlinePlus Vector DB (Required)
+
+Before running the app, prepare the local knowledge corpus from MedlinePlus lab tests:
+
+```bash
+uv run python scripts/prepare_vector_db.py --clean-knowledge-dir
+```
+
+This command:
+- Downloads all pages linked under `https://medlineplus.gov/lab-tests/` into `data/knowledge/medlineplus/`
+- Rebuilds the Chroma knowledge collection from those files
+
+To reduce vector DB size for faster retrieval, prune to the curated subset and rebuild:
+
+```bash
+uv run python scripts/prune_medlineplus_knowledge.py
+uv run python -c 'from src.config import AppConfig; from src.retrieval.vector_store import LocalVectorStore; cfg=AppConfig(); store=LocalVectorStore(cfg); print(store.bootstrap_knowledge_base(force_rebuild=True))'
 ```
 
 ## Run
@@ -103,20 +133,14 @@ Open the URL shown by Streamlit (typically `http://localhost:8501`).
 
 1. File parser extracts text from report.
 2. Regex extractor detects structured lab values.
-3. Report is chunked and indexed in local Chroma report collection.
+3. Report is chunked and indexed in local Chroma report collection only once per report content hash.
 4. App retrieves relevant report + medical knowledge chunks.
 5. LangGraph pipeline runs:
    - `parse_labs`
-   - `gemma_tool_call_node`
+   - `deterministic_prep_node`
    - `llm_node`
-6. Gemma must call local tools in two sequential steps:
-   - `flag_abnormal_results`
-   - `retrieve_medical_context`
-7. Gemma returns structured JSON, rendered in Streamlit sections.
-
-If Gemma does not return either required tool call, the graph raises an error.
-This is intentional because the project is designed to showcase Gemma function
-calling, not a deterministic fallback.
+6. Deterministic prep performs local abnormality checks and Chroma retrieval.
+7. Gemma generates the final structured response from prepared inputs.
 
 ## Safety Notes
 
@@ -129,7 +153,7 @@ calling, not a deterministic fallback.
 - `Connection refused` to Ollama:
   - Start Ollama with `ollama serve`.
 - Missing model:
-  - Run `ollama pull gemma4:26b` and `ollama pull nomic-embed-text`.
+  - Run `ollama pull gemma4:e4b` and `ollama pull nomic-embed-text`.
 - Gemma tool-calling error:
   - Confirm that your Ollama Gemma model supports tool/function calls.
   - Increase `OLLAMA_TIMEOUT_SECONDS` in `.env` if your Mac needs more time.

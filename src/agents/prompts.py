@@ -42,32 +42,3 @@ lifestyle_recommendations (array of strings),
 questions_for_doctor (array of strings),
 disclaimer (string)
 """
-
-FLAG_TOOL_PROMPT_TEMPLATE = """
-You are coordinating a local medical report workflow.
-The report has already been parsed into structured measurements.
-
-You must call the available local tool named flag_abnormal_results with the
-measurements JSON.
-
-Do not diagnose. Do not give medical advice. Your role in this step is to choose local tools.
-
-Measurements JSON:
-{lab_measurements}
-"""
-
-RETRIEVAL_TOOL_PROMPT_TEMPLATE = """
-You are coordinating a local medical report workflow.
-The abnormal-result tool has already inspected the report.
-
-You must call the available local tool named retrieve_medical_context with a
-concise query made from the abnormal marker names and nutrition-related signals.
-
-Do not diagnose. Do not give medical advice. Your role in this step is to choose local tools.
-
-Measurements JSON:
-{lab_measurements}
-
-Abnormal-result tool output:
-{flag_output}
-"""

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import uuid
-
 import pandas as pd
 import streamlit as st
 from langchain_ollama import ChatOllama
@@ -95,12 +93,20 @@ run = st.button("Run Local Analysis", type="primary")
 if not run:
     st.stop()
 
-report_id = str(uuid.uuid4())
-with st.spinner("Indexing report in local ChromaDB..."):
-    vector_store.index_report(report_id=report_id, report_text=report_text)
+report_id = vector_store.stable_report_id(report_text)
+indexed_now = False
+if not vector_store.report_is_indexed(report_id):
+    with st.spinner("Indexing report in local ChromaDB..."):
+        vector_store.index_report(report_id=report_id, report_text=report_text)
+    indexed_now = True
+
+if indexed_now:
+    st.caption("Report embeddings were added to local ChromaDB for this content hash.")
+else:
+    st.caption("Reused existing report embeddings from local ChromaDB (same report).")
 
 try:
-    with st.spinner("Running LangGraph workflow with mandatory Gemma tool calls..."):
+    with st.spinner("Running local analysis workflow..."):
         result = graph.invoke({"report_id": report_id, "report_text": report_text})
 except Exception as exc:
     st.error(f"Analysis stopped: {exc}")
@@ -108,12 +114,6 @@ except Exception as exc:
 
 measurements = result.get("measurements", [])
 output = result.get("output")
-tool_trace = result.get("tool_trace", [])
-
-if tool_trace:
-    with st.expander("Gemma local function calls", expanded=False):
-        for item in tool_trace:
-            st.json(item)
 
 st.subheader("Extracted Lab Values")
 if measurements:
